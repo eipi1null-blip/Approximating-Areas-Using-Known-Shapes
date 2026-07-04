@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Area Approximation Using Known Shapes</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #fff; color: #3f3f46; font-family: Georgia, "Times New Roman", serif; }
+    main { width: min(1220px, calc(100vw - 16px)); margin: 8px auto; border: 2px solid #8c8c8c; display: grid; grid-template-columns: 405px 1fr; min-height: 680px; }
+    .panel { background: #e9edf5; border-right: 4px solid #6b7fbd; padding: 28px 28px; display: flex; flex-direction: column; gap: 28px; }
+    .row { display: flex; align-items: center; gap: 18px; font-family: Arial, Helvetica, sans-serif; font-size: 31px; font-weight: 800; }
+    .check { width: 54px; height: 54px; border: 4px solid #7f7f86; border-radius: 6px; background: #fff; position: relative; flex: 0 0 auto; }
+    .active .check { background: #6658d9; border-color: #6658d9; }
+    .active .check::after { content: ""; position: absolute; left: 12px; top: 6px; width: 22px; height: 36px; border: solid #fff; border-width: 0 7px 7px 0; transform: rotate(45deg); }
+    button { border: 0; padding: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+    .metric { text-align: center; color: #244a9b; font-size: 35px; font-weight: 800; line-height: 1.35; }
+    .metric strong { display: block; font-size: 34px; }
+    .metric.pink { color: #ca3d76; margin-top: 10px; }
+    .slider-wrap { padding: 8px 8px 0; }
+    input[type="range"] { width: 100%; accent-color: #ca3d76; }
+    .group-title { font-size: 34px; font-weight: 800; color: #55555b; margin-top: 14px; }
+    .choices { display: flex; align-items: center; gap: 24px; }
+    .choices .row { gap: 12px; font-size: 29px; }
+    .stage { position: relative; min-width: 0; background: #fff; }
+    canvas { display: block; width: 100%; height: 100%; min-height: 680px; touch-action: none; }
+    .reset { position: absolute; right: 26px; top: 20px; width: 58px; height: 58px; border: 0; color: #777; font: 700 54px Arial, Helvetica, sans-serif; line-height: 58px; text-align: center; cursor: pointer; }
+    @media (max-width: 820px) {
+      main { grid-template-columns: 1fr; }
+      .panel { border-right: 0; border-bottom: 4px solid #6b7fbd; }
+      canvas { min-height: 540px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <aside class="panel">
+      <button id="regionMode" class="row" type="button"><span class="check"></span><span>Adjust region</span></button>
+      <div class="metric">Area of the region:<strong><span id="regionArea">0.00</span> cm<sup>2</sup></strong></div>
+      <button id="gridMode" class="row active" type="button"><span class="check"></span><span>Adjust grid</span></button>
+      <div class="slider-wrap"><input id="gridSlider" type="range" min="0" max="100" value="0" aria-label="Grid size"></div>
+      <div class="group-title">Approximation type</div>
+      <div class="choices">
+        <button id="innerMode" class="row active" type="button"><span class="check"></span><span>Inner</span></button>
+        <button id="outerMode" class="row" type="button"><span class="check"></span><span>Outer</span></button>
+      </div>
+      <div class="metric pink">Approximate area:<strong><span id="approxArea">0.00</span> cm<sup>2</sup></strong></div>
+    </aside>
+    <section class="stage">
+      <button id="resetButton" class="reset" type="button" aria-label="Reset">↻</button>
+      <canvas id="canvas" width="900" height="680"></canvas>
+    </section>
+  </main>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const regionAreaEl = document.getElementById('regionArea');
+    const approxAreaEl = document.getElementById('approxArea');
+    const regionModeBtn = document.getElementById('regionMode');
+    const gridModeBtn = document.getElementById('gridMode');
+    const innerModeBtn = document.getElementById('innerMode');
+    const outerModeBtn = document.getElementById('outerMode');
+    const gridSlider = document.getElementById('gridSlider');
+    const resetButton = document.getElementById('resetButton');
+
+    const defaultPoints = [
+      {x:1.0,y:3.0},{x:1.45,y:7.95},{x:3.35,y:8.7},{x:4.1,y:6.05},{x:5.75,y:7.2},
+      {x:7.95,y:8.25},{x:8.5,y:5.1},{x:7.55,y:1.55},{x:4.2,y:0.75},{x:2.35,y:1.35}
+    ];
+    let points = defaultPoints.map(p => ({...p}));
+    let mode = 'grid';
+    let approxType = 'inner';
+    let dragIndex = -1;
+
+    const pad = { left: 88, right: 70, top: 40, bottom: 80 };
+    const plot = { x: pad.left, y: pad.top, w: canvas.width - pad.left - pad.right, h: canvas.height - pad.top - pad.bottom };
+
+    function sx(x) { return plot.x + x / 10 * plot.w; }
+    function sy(y) { return plot.y + plot.h - y / 10 * plot.h; }
+    function ux(x) { return (x - plot.x) / plot.w * 10; }
+    function uy(y) { return (plot.y + plot.h - y) / plot.h * 10; }
+
+    function catmull(p0, p1, p2, p3, t) {
+      const t2 = t * t;
+      const t3 = t2 * t;
+      return {
+        x: 0.5 * ((2*p1.x) + (-p0.x+p2.x)*t + (2*p0.x-5*p1.x+4*p2.x-p3.x)*t2 + (-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+        y: 0.5 * ((2*p1.y) + (-p0.y+p2.y)*t + (2*p0.y-5*p1.y+4*p2.y-p3.y)*t2 + (-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
+      };
+    }
+
+    function boundarySamples(stepsPerSegment = 20) {
+      const samples = [];
+      for (let i = 0; i < points.length; i += 1) {
+        const p0 = points[(i - 1 + points.length) % points.length];
+        const p1 = points[i];
+        const p2 = points[(i + 1) % points.length];
+        const p3 = points[(i + 2) % points.length];
+        for (let s = 0; s < stepsPerSegment; s += 1) samples.push(catmull(p0, p1, p2, p3, s / stepsPerSegment));
+      }
+      return samples;
+    }
+
+    function area(poly) {
+      let sum = 0;
+      for (let i = 0; i < poly.length; i += 1) {
+        const a = poly[i], b = poly[(i + 1) % poly.length];
+        sum += a.x * b.y - b.x * a.y;
+      }
+      return Math.abs(sum) / 2;
+    }
+
+    function inside(pt, poly) {
+      let c = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const pi = poly[i], pj = poly[j];
+        if (((pi.y > pt.y) !== (pj.y > pt.y)) && pt.x < (pj.x - pi.x) * (pt.y - pi.y) / (pj.y - pi.y) + pi.x) c = !c;
+      }
+      return c;
+    }
+
+    function gridSize() {
+      const v = Number(gridSlider.value) / 100;
+      return 2 - v * 1.5;
+    }
+
+    function selectedSquares(poly, size) {
+      const out = [];
+      for (let x = 0; x < 10; x += size) {
+        for (let y = 0; y < 10; y += size) {
+          const corners = [{x,y},{x:x+size,y},{x:x+size,y:y+size},{x,y:y+size}];
+          const tests = corners.map(c => inside(c, poly));
+          const center = inside({x:x+size/2,y:y+size/2}, poly);
+          if ((approxType === 'inner' && tests.every(Boolean)) || (approxType === 'outer' && (tests.some(Boolean) || center))) {
+            out.push({x,y,size});
+          }
+        }
+      }
+      return out;
+    }
+
+    function drawPath(poly, fill, stroke, width) {
+      ctx.beginPath();
+      ctx.moveTo(sx(poly[0].x), sy(poly[0].y));
+      for (let i = 1; i < poly.length; i += 1) ctx.lineTo(sx(poly[i].x), sy(poly[i].y));
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = width;
+      ctx.stroke();
+    }
+
+    function draw() {
+      const poly = boundarySamples(18);
+      const actual = area(poly);
+      const size = gridSize();
+      const squares = selectedSquares(poly, size);
+      regionAreaEl.textContent = actual.toFixed(2);
+      approxAreaEl.textContent = (squares.length * size * size).toFixed(2);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = '#444850';
+      ctx.setLineDash([8, 10]);
+      ctx.lineWidth = 3;
+      for (let x = 0; x <= 10.001; x += size) {
+        ctx.beginPath(); ctx.moveTo(sx(x), sy(0)); ctx.lineTo(sx(x), sy(10)); ctx.stroke();
+      }
+      for (let y = 0; y <= 10.001; y += size) {
+        ctx.beginPath(); ctx.moveTo(sx(0), sy(y)); ctx.lineTo(sx(10), sy(y)); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      drawPath(poly, 'rgba(86, 118, 181, .16)', '#5872b4', 5);
+
+      ctx.fillStyle = 'rgba(199, 56, 111, .18)';
+      ctx.strokeStyle = '#c23b73';
+      ctx.lineWidth = 2.5;
+      for (const q of squares) {
+        ctx.fillRect(sx(q.x), sy(q.y + q.size), sx(q.x + q.size) - sx(q.x), sy(q.y) - sy(q.y + q.size));
+        ctx.strokeRect(sx(q.x), sy(q.y + q.size), sx(q.x + q.size) - sx(q.x), sy(q.y) - sy(q.y + q.size));
+      }
+
+      if (mode === 'region') {
+        for (const p of points) {
+          ctx.fillStyle = '#e92d41';
+          ctx.strokeStyle = '#111';
+          ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), 13, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        }
+      }
+
+      ctx.fillStyle = '#494949';
+      ctx.font = '700 27px Georgia, serif';
+      ctx.fillText('1 cm', sx(.18), sy(.35));
+      ctx.strokeStyle = '#6e6e6e';
+      ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.moveTo(sx(.05), sy(.18)); ctx.lineTo(sx(1.05), sy(.18)); ctx.stroke();
+    }
+
+    function setMode(next) {
+      mode = next;
+      regionModeBtn.classList.toggle('active', mode === 'region');
+      gridModeBtn.classList.toggle('active', mode === 'grid');
+      draw();
+    }
+
+    function setApprox(next) {
+      approxType = next;
+      innerModeBtn.classList.toggle('active', approxType === 'inner');
+      outerModeBtn.classList.toggle('active', approxType === 'outer');
+      draw();
+    }
+
+    function pointerPos(evt) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: (evt.clientX - rect.left) / rect.width * canvas.width, y: (evt.clientY - rect.top) / rect.height * canvas.height };
+    }
+
+    canvas.addEventListener('pointerdown', evt => {
+      if (mode !== 'region') return;
+      const p = pointerPos(evt);
+      let best = -1, dist = Infinity;
+      points.forEach((pt, i) => {
+        const d = Math.hypot(sx(pt.x) - p.x, sy(pt.y) - p.y);
+        if (d < dist) { dist = d; best = i; }
+      });
+      if (dist < 52) {
+        dragIndex = best;
+        canvas.setPointerCapture(evt.pointerId);
+        evt.preventDefault();
+      }
+    });
+    canvas.addEventListener('pointermove', evt => {
+      if (dragIndex < 0) return;
+      const p = pointerPos(evt);
+      points[dragIndex].x = Math.max(.3, Math.min(9.7, ux(p.x)));
+      points[dragIndex].y = Math.max(.3, Math.min(9.7, uy(p.y)));
+      evt.preventDefault();
+      draw();
+    });
+    canvas.addEventListener('pointerup', () => { dragIndex = -1; });
+
+    regionModeBtn.addEventListener('click', () => setMode('region'));
+    gridModeBtn.addEventListener('click', () => setMode('grid'));
+    innerModeBtn.addEventListener('click', () => setApprox('inner'));
+    outerModeBtn.addEventListener('click', () => setApprox('outer'));
+    gridSlider.addEventListener('input', draw);
+    resetButton.addEventListener('click', () => { points = defaultPoints.map(p => ({...p})); gridSlider.value = 0; approxType = 'inner'; mode = 'grid'; setApprox('inner'); setMode('grid'); });
+
+    draw();
+  </script>
+</body>
+</html>
